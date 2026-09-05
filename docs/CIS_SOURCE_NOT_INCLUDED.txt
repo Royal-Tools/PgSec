@@ -1,0 +1,3 @@
+The CIS PostgreSQL 16 Benchmark PDF is not redistributed in this source archive.
+Assessment implementation target: CIS PostgreSQL 16 Benchmark v1.1.0 dated 2025-06-30.
+Use your authorized copy of the CIS Benchmark for validation/review.

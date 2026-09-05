@@ -1,0 +1,8 @@
+# Local build cache and generated artifacts
+build/
+dist/
+reports/
+__pycache__/
+*.pyc
+*.pdf
+.pytest_cache/

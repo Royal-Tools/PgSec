@@ -1,0 +1,2 @@
+# No third-party Python dependencies are required at runtime.
+# Python 3.10+ is sufficient for the source distribution.

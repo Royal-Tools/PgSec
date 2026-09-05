@@ -1,0 +1,37 @@
+{
+  "syslog_facilities": [
+    "local0"
+  ],
+  "active_login_roles": [
+    "postgres",
+    "app_user",
+    "report_user"
+  ],
+  "allowed_superusers": [
+    "postgres"
+  ],
+  "dml_allowlist": [
+    "app_user|public|orders|INSERT",
+    "app_user|public|orders|UPDATE"
+  ],
+  "rls_required_tables": [
+    "public.customer_private"
+  ],
+  "allow_bypassrls_roles": [],
+  "require_password_expiry": false,
+  "backup_max_age_hours": 168,
+  "restore_test_max_age_days": 120,
+  "restore_test_epoch": 0,
+  "allowed_output_plugins": [
+    "pgoutput",
+    "test_decoding"
+  ],
+  "allowed_extensions": [],
+  "approved_repository_patterns": [
+    "repo.company.example/postgresql",
+    "internal-pgdg-mirror"
+  ],
+  "required_packages": [
+    "postgresql16-docs"
+  ]
+}

@@ -1,0 +1,4 @@
+*.sh text eol=lf
+PGSEC_OFFLINE_LINUX_X86_64_PRODUCTION_v1.1.2/pg-sec-audit text eol=lf
+native/pg-sec-audit.sh text eol=lf
+scripts/build_offline.sh text eol=lf
