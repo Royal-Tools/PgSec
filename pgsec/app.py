@@ -3,14 +3,15 @@ import argparse, getpass, ipaddress, os, sys, time, socket, json
 from pathlib import Path
 from .models import Target
 from .executors import LocalExecutor, SSHExecutor, ContainerExecutor
-from .discovery import discover_host, discover_postgres, discover_containers, inspect_container
+from .discovery import discover_host, discover_postgres, discover_containers, inspect_container, discover_db_users
 from .audit import Auditor
-from .rules import CIS_RULES, ESA_RULES
-from .versioning import get_current_pg16
+from .rules import CIS_RULES_BY_MAJOR, ESA_RULES, BENCHMARKS
+from .versioning import get_current_pgs
 from .reporting import build_report, save_reports
 from . import terminal as ui
+from .util import version_tuple
 
-VERSION='1.1.2'
+VERSION='1.2.0'
 
 def load_targets(value: str) -> list[str]:
     p=Path(value)
@@ -82,6 +83,9 @@ def _wizard(args):
     ui.section('Assessment')
     m=_choice('Assessment',['Discovery','CIS + ESA','Discovery + CIS + ESA'],'Discovery + CIS + ESA')
     args.mode={'Discovery':'discovery','CIS + ESA':'cis','Discovery + CIS + ESA':'all'}[m]
+    if args.mode!='discovery':
+        b=_choice('CIS benchmark',['Auto-detect','CIS 16','CIS 18'],'Auto-detect')
+        args.benchmark={'Auto-detect':'auto','CIS 16':'16','CIS 18':'18'}[b]
     if not args.local:
         args.container_policy=_choice('Container selection',['Interactive per host','Auto all PostgreSQL containers','Host only'],'Interactive per host')
     else:
@@ -107,6 +111,7 @@ def _parse_args(argv=None):
     p.add_argument('--accept-new-hostkey',action='store_true',help='trust unknown host keys on first use')
     p.add_argument('--known-hosts',default=os.path.expanduser('~/.ssh/known_hosts'))
     p.add_argument('--mode',choices=['discovery','cis','all'],default='all')
+    p.add_argument('--benchmark',choices=['auto','16','18'],default='auto',help='CIS benchmark: auto-detect from the server major version, or force CIS 16 / CIS 18')
     p.add_argument('--db-user')
     p.add_argument('--db-name',default='postgres')
     p.add_argument('--output-dir',default='.')
@@ -136,23 +141,60 @@ def _container_menu(host, rows):
             i=int(v);return [rows[i-1]]
         except:ui.warn('Invalid selection.')
 
-def _scan_one(ex, target: Target, current_pg16: str, mode: str, container_meta=None):
+def resolve_benchmark(pref: int|None, major: int|None):
+    # Forced preference always wins (a major mismatch is resolved by the CIS N/A gate).
+    # Auto mode maps the detected major to its benchmark; with no version information
+    # the caller may ask interactively; unsupported majors get no CIS score at all.
+    if pref:return pref
+    if major in (16,18):return major
+    if major is None:return 'ASK'
+    return None
+
+def _baseline_for(major: int) -> tuple[str,str]:
+    baselines=getattr(_scan_one,'baselines',None)
+    if baselines is None:baselines=_scan_one.baselines={}
+    if major not in baselines:
+        baselines[major]=get_current_pgs([major],getattr(_scan_one,'allow_network',True),2.0)[major]
+    return baselines[major]
+
+def _scan_one(ex, target: Target, mode: str, container_meta=None):
     label=target.label();ui.section(f'Target: {label}')
     ui.step('Discovery')
     host=discover_host(ex);pg=discover_postgres(ex);discovery={'host':host,'postgres':pg}
     if container_meta:discovery['container']=container_meta
     ui.info(f"PostgreSQL detected={pg.get('detected')} version={','.join(pg.get('versions',[])) or 'unknown'} SQL-access={pg.get('sql_access')}")
-    cis=[];esa=[]
+    users=discover_db_users(ex) if pg.get('sql_access') else []
+    cis=[];esa=[];bench=None
     if mode in {'cis','all'}:
         if not pg.get('detected'):
             ui.warn('PostgreSQL was not detected on this execution target; CIS/ESA assessment skipped.')
-            return {'target':{**target.__dict__,'label':label},'discovery':discovery,'cis':cis,'esa':esa}
-        aud=Auditor(ex,target,current_pg16,{'host':host,'postgres':pg,'container':container_meta or {},'policy':getattr(_scan_one,'policy',{}),'force_cis_major_mismatch':getattr(_scan_one,'force_cis_major_mismatch',False)})
-        ui.section('CIS PostgreSQL 16 Benchmark v1.1.0')
-        cis=aud.run_cis(callback=lambda r,n:ui.print_control(r,n,len(CIS_RULES)))
+            return {'target':{**target.__dict__,'label':label,'cis_benchmark':''},'discovery':discovery,'users':users,'cis':cis,'esa':esa,'benchmark':None}
+        major=None
+        if pg.get('versions'):
+            vt=version_tuple(pg['versions'][0]);major=vt[0] if vt else None
+        bench=resolve_benchmark(getattr(_scan_one,'bench_pref',None),major)
+        if bench=='ASK':
+            if getattr(_scan_one,'non_interactive',False):
+                ui.warn('PostgreSQL major version could not be determined; CIS skipped. Use --benchmark 16 or 18 to force a benchmark.')
+                bench=None
+            else:
+                b=_choice(f'CIS benchmark for {label} (server major undetermined)',['CIS 16','CIS 18','Skip CIS'],'CIS 16')
+                bench={'CIS 16':16,'CIS 18':18,'Skip CIS':None}[b]
+        cur=''
+        if bench:
+            cur,src=_baseline_for(bench)
+            ui.info(f'CIS PostgreSQL {bench} benchmark: current minor baseline {cur} ({src})')
+        else:
+            ui.warn(f'No supported CIS benchmark for detected PostgreSQL major {major if major else "unknown"}; Discovery and ESA remain active.')
+        aud=Auditor(ex,target,cur,{'host':host,'postgres':pg,'container':container_meta or {},'policy':getattr(_scan_one,'policy',{}),'force_cis_major_mismatch':getattr(_scan_one,'force_cis_major_mismatch',False)},benchmark=bench or 16)
+        if bench:
+            rules=CIS_RULES_BY_MAJOR[bench]
+            ui.section(f'CIS PostgreSQL {bench} Benchmark')
+            cis=aud.run_cis(callback=lambda r,n:ui.print_control(r,n,len(rules)))
         ui.section('Enhanced Security Assessment (ESA)')
         esa=aud.run_esa(callback=lambda r,n:ui.print_control(r,n,len(ESA_RULES)))
-    return {'target':{**target.__dict__,'label':label},'discovery':discovery,'cis':cis,'esa':esa}
+    bench_label=BENCHMARKS[bench]['label'] if bench else ''
+    return {'target':{**target.__dict__,'label':label,'cis_benchmark':bench_label},'discovery':discovery,'users':users,'cis':cis,'esa':esa,'benchmark':bench}
 
 def main(argv=None):
     args=_parse_args(argv)
@@ -176,8 +218,6 @@ def main(argv=None):
         else:
             envpw=os.environ.get('PGSEC_SSH_PASSWORD')
             ssh_password=envpw if envpw is not None else _prompt_password('SSH password')
-    current,version_source=get_current_pg16(not args.no_network,2.0)
-    ui.info(f'PostgreSQL 16 patch baseline: {current} ({version_source})')
     policy={}
     if args.policy:
         try:
@@ -188,6 +228,10 @@ def main(argv=None):
             print(f'ERROR: unable to load --policy: {ex}',file=sys.stderr);return 2
     _scan_one.policy=policy
     _scan_one.force_cis_major_mismatch=args.force_cis_major_mismatch
+    _scan_one.bench_pref=None if args.benchmark=='auto' else int(args.benchmark)
+    _scan_one.baselines={}
+    _scan_one.non_interactive=args.non_interactive
+    _scan_one.allow_network=not args.no_network
     reports=[]
     if args.local:
         base=LocalExecutor(args.db_user,args.db_name)
@@ -203,11 +247,11 @@ def main(argv=None):
             elif pgrows and not args.non_interactive:chosen=_container_menu('local',rows)
         if chosen and chosen!=['HOST']:
             for row in chosen:
-                meta=inspect_container(base,rt,row['id']);ce=ContainerExecutor(base,rt,row['id'],args.db_user,args.db_name)
+                meta=inspect_container(base,rt,row['id']);ce=ContainerExecutor(base,rt,row['id'],args.db_user or meta.get('discovered_db_user'),args.db_name or meta.get('discovered_db_name') or 'postgres',meta.get('discovered_db_pass'))
                 t=Target('local-container','local',container_runtime=rt,container_id=row['id'],container_name=row['name'],container_image=row['image'],db_user=args.db_user,db_name=args.db_name)
-                reports.append(_scan_one(ce,t,current,args.mode,meta))
+                reports.append(_scan_one(ce,t,args.mode,meta))
         else:
-            t=Target('local','local',db_user=args.db_user,db_name=args.db_name);reports.append(_scan_one(base,t,current,args.mode))
+            t=Target('local','local',db_user=args.db_user,db_name=args.db_name);reports.append(_scan_one(base,t,args.mode))
     else:
         hosts=load_targets(args.ip or args.file)
         ui.info(f'Target hosts: {len(hosts)}')
@@ -217,7 +261,7 @@ def main(argv=None):
             probe=base.run('printf PGSEC_SSH_OK',12)
             if probe.rc!=0:
                 ui.error(f'SSH failed: {probe.stderr or probe.stdout}')
-                reports.append({'target':{'mode':'ssh','host':host,'label':host},'discovery':{'ssh_error':probe.stderr or probe.stdout},'cis':[],'esa':[]});continue
+                reports.append({'target':{'mode':'ssh','host':host,'label':host,'cis_benchmark':''},'discovery':{'ssh_error':probe.stderr or probe.stdout},'cis':[],'esa':[],'benchmark':None});continue
             ui.info('SSH connected')
             hf=discover_host(base)
             runtimes=[] if args.host_only else [x for x in hf.get('container_runtimes',[]) if args.runtime=='auto' or args.runtime in x]
@@ -230,15 +274,15 @@ def main(argv=None):
                 elif rows and not args.non_interactive:selected=_container_menu(host,rows)
             if selected and selected!=['HOST']:
                 for row in selected:
-                    meta=inspect_container(base,rt,row['id']);ce=ContainerExecutor(base,rt,row['id'],args.db_user,args.db_name)
+                    meta=inspect_container(base,rt,row['id']);ce=ContainerExecutor(base,rt,row['id'],args.db_user or meta.get('discovered_db_user'),args.db_name or meta.get('discovered_db_name') or 'postgres',meta.get('discovered_db_pass'))
                     t=Target('remote-container',host,args.port,args.user,'key' if args.key else 'password',args.key,rt,row['id'],row['name'],row['image'],args.db_user,args.db_name)
-                    reports.append(_scan_one(ce,t,current,args.mode,meta))
+                    reports.append(_scan_one(ce,t,args.mode,meta))
             elif selected==[]:
                 ui.warn('Host skipped by selection.')
             else:
                 t=Target('remote-host',host,args.port,args.user,'key' if args.key else 'password',args.key,db_user=args.db_user,db_name=args.db_name)
-                reports.append(_scan_one(base,t,current,args.mode))
-    report=build_report(reports,version_source,current)
+                reports.append(_scan_one(base,t,args.mode))
+    report=build_report(reports,_scan_one.baselines)
     j,x=save_reports(report,args.output_dir,args.prefix)
     ui.section('Output')
     ui.info(f'JSON : {j}')

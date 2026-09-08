@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 *.pdf
 .pytest_cache/
+PGSEC_OFFLINE_*/

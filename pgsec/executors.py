@@ -160,13 +160,15 @@ class SSHExecutor(Executor):
 
 class ContainerExecutor(Executor):
     kind="container"
-    def __init__(self, base: Executor, runtime: str, container: str, db_user: str|None=None, db_name: str="postgres"):
-        self.base=base; self.runtime=runtime; self.container=container; self.db_user=db_user; self.db_name=db_name; self.sql_prefix=None
+    def __init__(self, base: Executor, runtime: str, container: str, db_user: str|None=None, db_name: str="postgres", db_pass: str|None=None):
+        self.base=base; self.runtime=runtime; self.container=container; self.db_user=db_user; self.db_name=db_name; self.db_pass=db_pass; self.sql_prefix=None
     def build_command(self, command: str) -> str:
         return f"{self.runtime} exec {shell_quote(self.container)} sh -lc {shell_quote(command)}"
     def run(self, command: str, timeout: int=20, env=None) -> CommandResult:
-        if env:
-            exports=" ".join(f"{k}={shell_quote(v)}" for k,v in env.items())
+        e=(env or {}).copy()
+        if self.db_pass:e['PGPASSWORD']=self.db_pass
+        if e:
+            exports=" ".join(f"{k}={shell_quote(v)}" for k,v in e.items())
             command=f"env {exports} {command}"
         return self.base.run(self.build_command(command),timeout)
     def sql(self, sql: str, timeout: int=20) -> CommandResult:
@@ -182,6 +184,7 @@ class ContainerExecutor(Executor):
                 cmd=f"su -s /bin/sh postgres -c {shell_quote(base)}"
             else:
                 cmd=prefix+base
+            # If we have a password, ensure it is set for the psql process
             res=self.run(f"PGCONNECT_TIMEOUT=3 {cmd} </dev/null",timeout)
             if res.rc==0:
                 if self.sql_prefix is None:self.sql_prefix=prefix

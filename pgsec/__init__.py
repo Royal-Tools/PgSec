@@ -1,0 +1,6 @@
+from .app import main
+
+VERSION = '1.2.0'
+
+if __name__ == '__main__':
+    raise SystemExit(main())

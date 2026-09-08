@@ -4,7 +4,8 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from .util import atomic_write
 
-DEFAULT_PG16 = "16.15"
+DEFAULTS = {16: "16.15", 18: "18.6"}
+SUPPORTED_MAJORS = tuple(DEFAULTS)
 VERSION_URL = "https://www.postgresql.org/support/versioning/"
 
 def cache_path() -> Path:
@@ -19,28 +20,43 @@ def _read_cache() -> dict:
     except Exception:
         return {}
 
-def _write_cache(v: str) -> None:
+def _write_cache(values: dict[int,str]) -> None:
     try:
-        atomic_write(cache_path(),json.dumps({'postgresql16':v,'updated_at':int(time.time()),'source':VERSION_URL},indent=2),0o600)
+        merged={k:v for k,v in _read_cache().items() if not k.startswith('postgresql')}
+        for major,v in values.items():merged[f'postgresql{major}']=v
+        merged['updated_at']=int(time.time());merged['source']=VERSION_URL
+        atomic_write(cache_path(),json.dumps(merged,indent=2),0o600)
     except Exception:
         pass
 
-def get_current_pg16(allow_network: bool=True, timeout: float=2.0) -> tuple[str,str]:
+def _parse_minor(html: str, major: int) -> str|None:
+    # The versioning page lists one row per supported major with its current minor.
+    m=re.search(rf'(?is)>\s*{major}\s*<.*?>\s*({major}\.\d+)\s*<',html)
+    if not m:
+        m=re.search(rf'\b{major}\s*\|\s*({major}\.\d+)\b',re.sub(r'<[^>]+>','|',html))
+    return m.group(1) if m else None
+
+def get_current_pgs(majors, allow_network: bool=True, timeout: float=2.0) -> dict[int,tuple[str,str]]:
+    majors=[int(x) for x in dict.fromkeys(majors) if int(x) in DEFAULTS]
+    out={m:(DEFAULTS[m],'bundled') for m in majors}
+    if not majors:return out
     cache=_read_cache()
-    cached=cache.get('postgresql16')
     if allow_network:
         try:
-            req=Request(VERSION_URL,headers={'User-Agent':'pg-sec-audit/1.0 (+security-assessment)'})
+            req=Request(VERSION_URL,headers={'User-Agent':'pg-sec-audit/1.2 (+security-assessment)'})
             with urlopen(req,timeout=timeout) as r:
                 html=r.read(400000).decode('utf-8','replace')
-            # Current versioning page contains a row with major 16 and current minor.
-            m=re.search(r'(?is)>\s*16\s*<.*?>\s*(16\.\d+)\s*<',html)
-            if not m:
-                m=re.search(r'\b16\s*\|\s*(16\.\d+)\b',re.sub(r'<[^>]+>','|',html))
-            if m:
-                v=m.group(1); _write_cache(v); return v,'online'
+            found={m:v for m in majors if (v:=_parse_minor(html,m))}
+            if found:
+                _write_cache(found)
+                for m,v in found.items():out[m]=(v,'online')
+                return out
         except Exception:
             pass
-    if cached and re.fullmatch(r'16\.\d+',str(cached)):
-        return str(cached),'cache'
-    return DEFAULT_PG16,'bundled'
+    for m in majors:
+        cached=cache.get(f'postgresql{m}')
+        if cached and re.fullmatch(rf'{m}\.\d+',str(cached)):out[m]=(str(cached),'cache')
+    return out
+
+def get_current_pg16(allow_network: bool=True, timeout: float=2.0) -> tuple[str,str]:
+    return get_current_pgs([16],allow_network,timeout)[16]

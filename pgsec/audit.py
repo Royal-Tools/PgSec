@@ -3,7 +3,7 @@ import json, re, time, os, fnmatch
 from pathlib import Path
 from typing import Callable, Iterable
 from .models import Result, Evidence, Target, CommandResult
-from .rules import CIS_RULES, ESA_RULES
+from .rules import CIS_RULES_BY_MAJOR, ESA_RULES, BENCHMARKS
 from .util import bool_on, bool_off, truncate, version_tuple, shell_quote
 
 LOG_LEVELS = ['debug5','debug4','debug3','debug2','debug1','info','notice','warning','error','log','fatal','panic']
@@ -16,13 +16,23 @@ TLS_ALLOWED = {
 }
 
 class Auditor:
-    def __init__(self, executor, target: Target, current_pg16: str='16.15', context: dict|None=None):
-        self.ex=executor; self.target=target; self.current_pg16=current_pg16; self.context=context or {}
+    def __init__(self, executor, target: Target, current_pg: str='16.15', context: dict|None=None, benchmark: int=16):
+        self.ex=executor; self.target=target; self.current_pg=current_pg; self.benchmark=benchmark; self.context=context or {}
         self.policy=self.context.get('policy') or {}
         self._setting_cache={}; self._sql_cache={}; self._shell_cache={}
 
     def _ev(self, source, detail, command='', rc=None):
-        return Evidence(source, truncate(detail,5000), truncate(command,1000), rc)
+        # Calculate hash for discovered paths/files in the evidence detail
+        path_hash = ''
+        if detail and (source in ('OS','SQL')):
+            # Common pattern: find absolute paths in the evidence text
+            paths=re.findall(r'(/[^\s|]+)', detail)
+            for p in paths:
+                if p.endswith('/') or not ('.' in p or 'postgres' in p or 'log' in p or 'conf' in p):continue
+                h=self._shell(f"sha256sum {shell_quote(p)} 2>/dev/null | cut -d' ' -f1",5)
+                if h.rc==0 and len(h.stdout.strip())==64:
+                    path_hash=h.stdout.strip();break
+        return Evidence(source, truncate(detail,5000), truncate(command,1000), rc, path_hash=path_hash)
 
     def _sql(self, sql: str, timeout=20) -> CommandResult:
         if sql not in self._sql_cache:
@@ -46,6 +56,7 @@ class Auditor:
         '4.6': 'Provide the approved DML authorization matrix for the reported grants: role/grantee | schema | table | business purpose | required INSERT/UPDATE/DELETE/TRUNCATE privileges. Identify any grant that should be revoked.',
         '4.7': 'Identify the tables/data domains that require Row Level Security (RLS) for this application. For each required table provide the intended protected roles/tenant rule, and list any explicitly approved BYPASSRLS role exceptions.',
         '6.7': 'State the FIPS requirement for this host/workload and whether FIPS mode is mandatory under organization or regulatory policy. If required, provide host-level evidence of OS FIPS mode and the validated cryptographic module/provider; if not required, provide the approved policy/exception stating that FIPS is not mandatory.',
+        '4.10': 'For every login-enabled PostgreSQL role reported without a stored password, state the account owner and purpose and whether it authenticates with SSL client certificates (provide certificate/issuer evidence). Roles that do not use certificates require a password.',
     }
 
     def _review_required_input(self, rule):
@@ -56,9 +67,19 @@ class Auditor:
             return 'Provide the organization policy, business requirement, or external-system evidence needed to decide this enhanced security check.'
         return 'Provide the organization policy/business requirement and the requested evidence needed to decide whether this control is compliant.'
 
+    def _attach_output(self, test_result: str, evidence) -> str:
+        # Test Result must carry the real command output, not only our verdict sentence.
+        # Evidence rows that are descriptive (no command) or already quoted are skipped.
+        for e in evidence or []:
+            detail=(e.detail or '').strip()
+            if not e.command or not detail:continue
+            if detail[:120] and detail[:120] in test_result:continue
+            test_result+=f"\n[{e.source}] {truncate(e.command,300)} (rc={e.rc})\n{truncate(detail,900)}"
+        return test_result
+
     def _mk(self, rule, status, test_result, evidence=None, comments=None, solution=None, source='CIS', required_input=None):
         req = required_input if required_input is not None else (self._review_required_input(rule) if status == 'REVIEW' else '')
-        return Result(status, f"{rule['id']} {rule['title']}", rule['description'], truncate(test_result,6000), solution or rule['solution'], comments or rule['comments'], rule['id'], source, evidence or [], req)
+        return Result(status, f"{rule['id']} {rule['title']}", rule['description'], truncate(self._attach_output(truncate(test_result,4500),evidence or []),6000), solution or rule['solution'], comments or rule['comments'], rule['id'], source, evidence or [], req)
 
     def _setting_result(self, rule, name, pred: Callable[[str],bool], expected: str, comments=None):
         r=self._setting(name); ev=[self._ev('SQL',r.stdout or r.stderr,f'SHOW {name};',r.rc)]
@@ -69,16 +90,17 @@ class Auditor:
 
     def run_cis(self, control_ids: Iterable[str]|None=None, callback=None) -> list[Result]:
         wanted=set(control_ids) if control_ids else None
-        selected=[r for r in CIS_RULES if not wanted or r['id'] in wanted]
-        # A CIS PostgreSQL 16 score is only meaningful on PostgreSQL 16.  The benchmark
+        catalog=CIS_RULES_BY_MAJOR[self.benchmark]
+        selected=[r for r in catalog if not wanted or r['id'] in wanted]
+        # A CIS score is only meaningful on the matching PostgreSQL major.  The benchmark
         # itself warns that applying it to a different product version can produce invalid
         # pass/fail results. Discovery and ESA may still run on other majors.
         sv=self._setting('server_version')
         vt=version_tuple(sv.stdout) if sv.rc==0 else ()
-        if vt and vt[0] != 16 and not self.context.get('force_cis_major_mismatch', False):
+        if vt and vt[0] != self.benchmark and not self.context.get('force_cis_major_mismatch', False):
             out=[]
             for rule in selected:
-                res=self._mk(rule,'N/A',f"Detected PostgreSQL {sv.stdout.strip()}; CIS PostgreSQL 16 v1.1.0 is not scored against a non-16 server. Use PostgreSQL 16 or explicitly force compatibility diagnostics.",[self._ev('SQL',sv.stdout,'SHOW server_version;',sv.rc)])
+                res=self._mk(rule,'N/A',f"Detected PostgreSQL {sv.stdout.strip()}; CIS PostgreSQL {self.benchmark} benchmark is not scored against a non-{self.benchmark} server. Use PostgreSQL {self.benchmark} or explicitly force compatibility diagnostics.",[self._ev('SQL',sv.stdout,'SHOW server_version;',sv.rc)])
                 out.append(res)
                 if callback: callback(res,len(out))
             return out
@@ -230,10 +252,10 @@ class Auditor:
     def cis_1_5(self,rule):
         r=self._setting('server_version'); ev=[self._ev('SQL',r.stdout or r.stderr,'SHOW server_version;',r.rc)]
         if r.rc!=0:return self._mk(rule,'ERROR','Unable to determine running PostgreSQL version.',ev)
-        v=r.stdout.strip(); cur=self.current_pg16
+        v=r.stdout.strip(); cur=self.current_pg
         major=version_tuple(v)[:1]
-        if major!=(16,):return self._mk(rule,'N/A',f"Detected PostgreSQL {v}; this benchmark implementation is for PostgreSQL 16. Current bundled PG16 minor={cur}.",ev)
-        return self._mk(rule,'PASS' if version_tuple(v)>=version_tuple(cur) else 'FAIL',f"Installed={v}; current PostgreSQL 16 minor={cur}",ev)
+        if major!=(self.benchmark,):return self._mk(rule,'N/A',f"Detected PostgreSQL {v}; this benchmark implementation is for PostgreSQL {self.benchmark}. Current bundled PG{self.benchmark} minor={cur}.",ev)
+        return self._mk(rule,'PASS' if version_tuple(v)>=version_tuple(cur) else 'FAIL',f"Installed={v}; current PostgreSQL {self.benchmark} minor={cur}",ev)
     def cis_1_6(self,rule):
         cmd="grep -RsnI --exclude='*.swp' --exclude='*.bak' 'PGPASSWORD' /root/.profile /root/.bashrc /root/.bash_profile /home/*/.profile /home/*/.bashrc /home/*/.bash_profile /home/*/.zshrc /etc/environment 2>/dev/null | head -100"
         r=self._shell(cmd,15);ev=[self._ev('OS',r.stdout or r.stderr,cmd,r.rc)]
@@ -478,6 +500,21 @@ class Auditor:
         extra=[x for x in supers if x not in allowed]
         if extra:return self._mk(rule,'FAIL','Unexpected superuser role(s) detected; reduce to predefined roles where possible or explicitly allow them in policy.allowed_superusers: '+', '.join(extra),ev)
         return self._mk(rule,'PASS',f"Superuser roles={supers or 'none'}; no unexpected superuser beyond allowed_superusers={sorted(allowed)}.",ev)
+    def cis_4_10(self,rule):
+        # CIS 18 4.10: a NULL password verifier means the role can never password-authenticate;
+        # any interactive use therefore implies certificate/external auth.  Instead of failing
+        # every passwordless role outright, policy.cert_login_roles declares the roles that are
+        # known to authenticate with SSL client certificates.
+        base="SELECT rolname FROM pg_authid WHERE rolpassword IS NULL AND rolcanlogin AND rolname NOT LIKE 'pg_%' ORDER BY 1;"
+        inv="SELECT rolname,CASE WHEN rolpassword IS NULL THEN 'NONE' WHEN rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'SCRAM-SHA-256' WHEN rolpassword LIKE 'md5%' THEN 'MD5' ELSE 'OTHER' END FROM pg_authid WHERE rolcanlogin AND rolname NOT LIKE 'pg_%' ORDER BY 1;"
+        r=self._sql(base);i=self._sql(inv);ev=[self._ev('SQL',r.stdout or r.stderr,base,r.rc),self._ev('SQL',i.stdout or i.stderr,'Login-role password-verifier inventory',i.rc)]
+        if r.rc:return self._mk(rule,'ERROR','pg_authid requires elevated database privilege; login roles without a stored password could not be audited.',ev)
+        nopw=[x.strip() for x in r.stdout.splitlines() if x.strip()]
+        cert=set(self.policy.get('cert_login_roles',[]))
+        unprotected=[x for x in nopw if x not in cert]
+        if unprotected:return self._mk(rule,'FAIL','Login role(s) with no stored password and no certificate-auth policy exception: '+', '.join(unprotected),ev)
+        if nopw:return self._mk(rule,'PASS','Login role(s) without a stored password are covered by policy.cert_login_roles (certificate-based authentication): '+', '.join(sorted(nopw)),ev)
+        return self._mk(rule,'PASS','Every non-system login-enabled role has a stored password verifier.',ev)
 
     # connection/login
     def cis_5_1(self,rule):
@@ -819,7 +856,9 @@ class Auditor:
     def esa_17(self,rule):
         sv=self._setting('server_version');ev=[self._ev('SQL',sv.stdout or sv.stderr,'SHOW server_version;',sv.rc)]
         if sv.rc:return self._esa_mk(rule,'ERROR','Unable to determine PostgreSQL version.',ev)
-        if version_tuple(sv.stdout)<(16,15):return self._esa_mk(rule,'FAIL',f"PostgreSQL {sv.stdout.strip()} predates 16.15; update first to receive output_plugin_libraries and current security fixes.",ev)
+        maj=version_tuple(sv.stdout)[:1]
+        minv=(16,15) if maj==(16,) else ((maj+(0,)) if maj else (16,15))
+        if version_tuple(sv.stdout)<minv:return self._esa_mk(rule,'FAIL',f"PostgreSQL {sv.stdout.strip()} predates {'.'.join(map(str,minv))}; update first to receive output_plugin_libraries and current security fixes.",ev)
         op=self._setting('output_plugin_libraries');slots=self._sql("SELECT DISTINCT plugin FROM pg_replication_slots WHERE plugin IS NOT NULL ORDER BY 1;");ev += [self._ev('SQL',op.stdout or op.stderr,'SHOW output_plugin_libraries;',op.rc),self._ev('SQL',slots.stdout or slots.stderr,'SELECT DISTINCT plugin FROM pg_replication_slots...',slots.rc)]
         if op.rc:return self._esa_mk(rule,'FAIL','output_plugin_libraries is unavailable despite a version that should support it; verify effective server binaries/version.',ev)
         allowed=[x.strip() for x in op.stdout.split(',') if x.strip()];plugins=[x.strip() for x in slots.stdout.splitlines() if x.strip()] if slots.rc==0 else []

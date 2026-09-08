@@ -49,12 +49,14 @@ class Evidence:
     command: str = ""
     rc: Optional[int] = None
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    path_hash: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "Source": self.source,
             "Detail": self.detail,
             "Command": self.command,
+            "Path Hash (SHA256)": self.path_hash,
             "Return Code": self.rc if self.rc is not None else "",
             "Timestamp": self.timestamp,
         }

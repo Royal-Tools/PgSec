@@ -1,10 +1,24 @@
 from __future__ import annotations
-import json, time, platform, os
+import json, re, time, platform, os
 from pathlib import Path
 from .xlsx_writer import write_xlsx
+from .rules import BENCHMARKS
 from .util import atomic_write, redact, sha256_file
 
 STATUSES=('PASS','FAIL','WARN','REVIEW','ERROR','N/A','SKIPPED')
+TOOL_VERSION='1.2.0'
+
+
+def _os_pretty(os_release: str) -> str:
+    m=re.search(r'(?m)^PRETTY_NAME=["\']?([^"\'\r\n]+)',os_release or '')
+    if m:return m.group(1).strip()
+    return next((l.strip() for l in (os_release or '').splitlines() if l.strip()),'')
+
+
+def _os_pretty(os_release: str) -> str:
+    m=re.search(r'(?m)^PRETTY_NAME=["\']?([^"\'\r\n]+)',os_release or '')
+    if m:return m.group(1).strip()
+    return next((l.strip() for l in (os_release or '').splitlines() if l.strip()),'')
 
 
 def _is_local_target(target: dict) -> bool:
@@ -46,8 +60,11 @@ def _posture(fail: int, error: int, review: int) -> str:
     return 'Healthy'
 
 
-def build_report(target_reports: list[dict], version_source: str, current_pg16: str) -> dict:
-    all_cis=[];all_esa=[];all_ev=[];discovery=[];scoreboard=[]
+def build_report(target_reports: list[dict], baselines: dict|None=None) -> dict:
+    # baselines maps PostgreSQL major -> (current minor, version-intelligence source).
+    baselines={int(k):tuple(v) for k,v in (baselines or {}).items()}
+    used=sorted({tr.get('benchmark') for tr in target_reports if tr.get('benchmark')})
+    all_cis=[];all_esa=[];all_ev=[];all_users=[];discovery=[];scoreboard=[]
     counts={}
     scopes=set()
     for tr in target_reports:
@@ -56,16 +73,35 @@ def build_report(target_reports: list[dict], version_source: str, current_pg16: 
         scopes.add(scope)
         d=tr.get('discovery') or {}
         pg=d.get('postgres') or {}
-        os_hostname='' if _is_local_target(target) else str((d.get('host') or {}).get('hostname') or '')
+        hf=d.get('host') or {}
+        cm=d.get('container') or {}
+        os_hostname='' if _is_local_target(target) else str(hf.get('hostname') or '')
         sql_access=bool(pg.get('sql_access'))
+        for u in tr.get('users') or []:
+            all_users.append({'Target':label,**u})
         discovery.append({
             'Target':label,'Scope':scope,'Host':host,'OS Hostname':os_hostname,
             'Mode':target.get('mode',''),
             'Container':target.get('container_name') or target.get('container_id') or '',
+            'Container Image':cm.get('image',''),
+            'Container User':str(cm.get('user') or ''),
+            'Container Privileged':'Yes' if cm.get('privileged') else ('No' if cm else ''),
+            'Container Ports':'; '.join(f"{p.get('host_ip') or '*'}:{p.get('host_port')}->{p.get('container_port')}" for p in cm.get('port_bindings',[])),
+            'OS Release':_os_pretty(hf.get('os_release','')),
+            'Kernel':hf.get('kernel',''),
+            'Architecture':hf.get('architecture',''),
+            'Audit User':hf.get('whoami',''),
+            'Container Runtimes':','.join(hf.get('container_runtimes',[])),
             'PostgreSQL Detected': 'Yes' if pg.get('detected') else 'No',
             'Version':','.join(pg.get('versions',[])),
             'SQL Access': 'Yes' if sql_access else 'No',
-            'OS':(d.get('host') or {}).get('os_release','')[:1000],
+            'Data Directory':pg.get('pgdata',''),
+            'Config File':pg.get('config_file',''),
+            'HBA File':pg.get('hba_file',''),
+            'PostgreSQL Binaries':','.join(pg.get('binaries',[]))[:200],
+            'Systemd Services':'; '.join(pg.get('services',[]))[:300],
+            'Config Files Found':len(pg.get('config_files',[]) or []),
+            'CIS Benchmark':BENCHMARKS[tr['benchmark']]['label'] if tr.get('benchmark') in BENCHMARKS else target.get('cis_benchmark',''),
         })
         t_counts={}
         for sec,key in [('CIS','cis'),('ESA','esa')]:
@@ -104,6 +140,9 @@ def build_report(target_reports: list[dict], version_source: str, current_pg16: 
     elif scopes=={'Remote'}: scope_value='Remote'
     elif scopes: scope_value='Mixed'
     else: scope_value='Unknown'
+    bench_labels=[BENCHMARKS[m]['label'] for m in used if m in BENCHMARKS]
+    bench_value=' + '.join(bench_labels) if bench_labels else ' / '.join(BENCHMARKS[m]['label'] for m in sorted(BENCHMARKS))
+    source_value=', '.join(sorted({src for _,src in baselines.values()})) or 'bundled'
     summary=[
       {'Metric':'Generated At','Value':time.strftime('%Y-%m-%d %H:%M:%S %z')},
       {'Metric':'Assessment Scope','Value':scope_value},
@@ -111,10 +150,11 @@ def build_report(target_reports: list[dict], version_source: str, current_pg16: 
       {'Metric':'CIS Pass Rate','Value':_pct(counts.get(('CIS','PASS'),0), cis_assessed)},
       {'Metric':'ESA Pass Rate','Value':_pct(counts.get(('ESA','PASS'),0), esa_assessed)},
       {'Metric':'Assessment Posture','Value':_posture(fail,error,review)},
-      {'Metric':'CIS Benchmark','Value':'CIS PostgreSQL 16 Benchmark v1.1.0 (2025-06-30)'},
-      {'Metric':'Current PostgreSQL 16 Minor','Value':current_pg16},
-      {'Metric':'Version Intelligence Source','Value':version_source},
+      {'Metric':'CIS Benchmark','Value':bench_value},
     ]
+    for major in sorted(baselines):
+        summary.append({'Metric':f'Current PostgreSQL {major} Minor','Value':baselines[major][0]})
+    summary.append({'Metric':'Version Intelligence Source','Value':source_value})
     for sec in ('CIS','ESA'):
         for status in STATUSES:
             summary.append({'Metric':f'{sec} {status}','Value':counts.get((sec,status),0)})
@@ -122,17 +162,23 @@ def build_report(target_reports: list[dict], version_source: str, current_pg16: 
     for tr in target_reports:
         json_targets.append({
           'target':tr['target'], 'discovery':tr.get('discovery',{}),
+          'users':tr.get('users',[]),
           'cis':[x.as_json_dict() for x in tr.get('cis',[])],
           'esa':[x.as_json_dict() for x in tr.get('esa',[])],
+          'benchmark':tr.get('benchmark'),
         })
+    primary=used[0] if used and used[0] in BENCHMARKS else 16
     return {
       'metadata':{
-        'tool':'pg-sec-audit','tool_version':'1.1.2','cis_benchmark':'CIS PostgreSQL 16 Benchmark v1.1.0',
-        'benchmark_date':'2025-06-30','current_postgresql16_minor':current_pg16,'version_intelligence_source':version_source,
+        'tool':'pg-sec-audit','tool_version':TOOL_VERSION,
+        'cis_benchmark':BENCHMARKS[primary]['label'],'benchmark_date':BENCHMARKS[primary]['date'],
+        'cis_benchmarks':{str(m):BENCHMARKS[m]['label'] for m in used if m in BENCHMARKS},
+        **{f'current_postgresql{m}_minor':baselines[m][0] for m in sorted(baselines)},
+        'version_intelligence_source':source_value,
         'generated_at':time.strftime('%Y-%m-%dT%H:%M:%S%z'),'platform':platform.platform(),
       },
       'targets':json_targets,
-      '_xlsx':{'summary':summary,'scoreboard':scoreboard,'discovery':discovery,'cis':all_cis,'esa':all_esa,'evidence':all_ev},
+      '_xlsx':{'summary':summary,'scoreboard':scoreboard,'discovery':discovery,'users':all_users,'cis':all_cis,'esa':all_esa,'evidence':all_ev},
     }
 
 def save_reports(report: dict, output_dir: str|Path, prefix: str='postgres-security-report') -> tuple[Path,Path]:

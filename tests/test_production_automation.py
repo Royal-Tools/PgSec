@@ -18,7 +18,7 @@ def _esa_status(aud, cid):
 
 def test_cis_major_mismatch_is_not_scored_as_cis16():
     fake = FakeExecutor(sql_responses={'SHOW server_version;': '18.6'})
-    aud = Auditor(fake, Target('local'), current_pg16='16.15')
+    aud = Auditor(fake, Target('local'), current_pg='16.15')
     rows = aud.run_cis(control_ids=['3.1.20','6.8'])
     assert [x.status for x in rows] == ['N/A','N/A']
     assert all('PostgreSQL 16' in x.test_result for x in rows)
@@ -113,7 +113,7 @@ def test_esa_extension_inventory_does_not_review_builtins_only():
 
 def test_reporting_keeps_requested_six_columns_first():
     tr={'target':{'label':'local','host':'local','mode':'local'},'discovery':{},'cis':[Result('PASS','X','D','T','S','C')],'esa':[]}
-    report=build_report([tr],'cache','16.15')
+    report=build_report([tr],{16:('16.15','cache')})
     keys=list(report['_xlsx']['cis'][0].keys())
     assert keys[:6] == ['Status','Name','Description','Test Result','Solution','Security Comments']
     assert keys[6:9] == ['Required Customer Input','Customer Response / Evidence','Auditor Decision']
@@ -129,7 +129,7 @@ def test_xlsx_has_title_header_freeze_and_status_style(tmp_path):
     }
     out=tmp_path/'r.xlsx'; write_xlsx(data,out)
     with zipfile.ZipFile(out) as z:
-        cis=z.read('xl/worksheets/sheet3.xml').decode()
+        cis=z.read('xl/worksheets/sheet4.xml').decode()
         assert '<mergeCell ref="A1:G1"/>' in cis
         assert 'ySplit="2"' in cis
         assert 'r="A3" s="3"' in cis  # FAIL status is colored after title/header
@@ -171,12 +171,12 @@ def test_every_review_is_actionable_and_json_contains_required_input():
 def test_review_required_input_is_visible_in_excel_security_comments(tmp_path):
     r=Result('REVIEW','1.2 Install only required packages','D','optional package found','S','C',required_input='Provide the packages required for the business/application.')
     tr={'target':{'label':'local','host':'local','mode':'local'},'discovery':{},'cis':[r],'esa':[]}
-    report=build_report([tr],'cache','16.15')
+    report=build_report([tr],{16:('16.15','cache')})
     assert report['_xlsx']['cis'][0]['Required Customer Input'] == r.required_input
     assert 'Required input from customer/employer:' not in report['_xlsx']['cis'][0]['Security Comments']
     out=tmp_path/'review.xlsx'; write_xlsx(report['_xlsx'],out)
     with zipfile.ZipFile(out) as z:
-        cis=z.read('xl/worksheets/sheet3.xml').decode()
+        cis=z.read('xl/worksheets/sheet4.xml').decode()
         assert 'Required Customer Input' in cis
         assert 'Provide the packages required for the business/application.' in cis
 
@@ -194,7 +194,7 @@ def test_internal_repository_becomes_deterministic_with_approved_repository_patt
 def test_cis_sheet_has_dedicated_customer_review_workflow_columns():
     r=Result('REVIEW','1.2 Install only required packages','D','optional package found','S','Attack surface concern.',required_input='Provide the exact business-required PostgreSQL packages and approved purpose for each optional package.')
     tr={'target':{'label':'local','host':'local','mode':'local'},'discovery':{},'cis':[r],'esa':[]}
-    report=build_report([tr],'cache','16.15')
+    report=build_report([tr],{16:('16.15','cache')})
     row=report['_xlsx']['cis'][0]
     assert list(row.keys()) == [
         'Status','Name','Description','Test Result','Solution','Security Comments',
@@ -209,7 +209,7 @@ def test_cis_sheet_has_dedicated_customer_review_workflow_columns():
 def test_non_review_cis_row_has_blank_customer_review_fields():
     r=Result('PASS','1.4 Data Cluster','D','ok','S','C')
     tr={'target':{'label':'local','host':'local','mode':'local'},'discovery':{},'cis':[r],'esa':[]}
-    row=build_report([tr],'cache','16.15')['_xlsx']['cis'][0]
+    row=build_report([tr],{16:('16.15','cache')})['_xlsx']['cis'][0]
     assert row['Required Customer Input'] == ''
     assert row['Customer Response / Evidence'] == ''
     assert row['Auditor Decision'] == ''
@@ -242,7 +242,7 @@ def test_xlsx_cis_sheet_contains_review_workflow_headers(tmp_path):
     }
     out=tmp_path/'review-workflow.xlsx'; write_xlsx(data,out)
     with zipfile.ZipFile(out) as z:
-        cis=z.read('xl/worksheets/sheet3.xml').decode()
+        cis=z.read('xl/worksheets/sheet4.xml').decode()
         assert 'Required Customer Input' in cis
         assert 'Customer Response / Evidence' in cis
         assert 'Auditor Decision' in cis
@@ -292,7 +292,7 @@ def test_local_report_host_is_local_not_os_hostname():
     tr={'target':{'label':'local/pg','host':'local','mode':'local-container','container_name':'pg'},
         'discovery':{'host':{'hostname':'DESKTOP-I6RJHHQ','os_release':'Ubuntu'},'postgres':{'detected':True,'versions':['16.14'],'sql_access':False}},
         'cis':[],'esa':[]}
-    report=build_report([tr],'bundled','16.15')
+    report=build_report([tr],{16:('16.15','bundled')})
     row=report['_xlsx']['discovery'][0]
     assert row['Host']=='local'
     assert row['Scope']=='Local'
@@ -305,7 +305,7 @@ def test_remote_report_host_is_entered_ip():
     tr={'target':{'label':'10.0.0.11','host':'10.0.0.11','mode':'remote-host'},
         'discovery':{'host':{'hostname':'db-prod-01','os_release':'RHEL'},'postgres':{'detected':True,'versions':['16.15'],'sql_access':True}},
         'cis':[Result('PASS','X','D','T','S','C')],'esa':[]}
-    report=build_report([tr],'cache','16.15')
+    report=build_report([tr],{16:('16.15','cache')})
     row=report['_xlsx']['discovery'][0]
     assert row['Host']=='10.0.0.11'
     assert row['Scope']=='Remote'
@@ -317,7 +317,7 @@ def test_remote_report_host_is_entered_ip():
 
 def test_summary_scoreboard_and_pass_rate_in_xlsx(tmp_path):
     tr={'target':{'label':'local','host':'local','mode':'local'},'discovery':{},'cis':[Result('PASS','X','D','T','S','C')],'esa':[]}
-    report=build_report([tr],'cache','16.15')
+    report=build_report([tr],{16:('16.15','cache')})
     out=tmp_path/'summary-modern.xlsx'; write_xlsx(report['_xlsx'],out)
     with zipfile.ZipFile(out) as z:
         summary=z.read('xl/worksheets/sheet1.xml').decode()
@@ -328,3 +328,61 @@ def test_summary_scoreboard_and_pass_rate_in_xlsx(tmp_path):
         chart=z.read('xl/charts/chart1.xml').decode()
         assert "Summary!$D$4:$D$10" in chart
 
+
+
+def test_users_sheet_lists_database_roles_with_target(tmp_path):
+    users=[{'Role':'postgres','Type':'Login','Login':'Yes','Superuser':'Yes','CreateRole':'Yes','CreateDB':'Yes','Replication':'Yes','BypassRLS':'Yes','Connection Limit':'-1','Valid Until':'never','Password Verifier':'SCRAM-SHA-256','Member Of':''},
+           {'Role':'app_user','Type':'Login','Login':'Yes','Superuser':'No','CreateRole':'No','CreateDB':'No','Replication':'No','BypassRLS':'No','Connection Limit':'20','Valid Until':'never','Password Verifier':'SCRAM-SHA-256','Member Of':''}]
+    tr={'target':{'label':'local','host':'local','mode':'local','cis_benchmark':'CIS PostgreSQL 16 Benchmark v1.1.0'},'discovery':{},'users':users,'cis':[],'esa':[],'benchmark':16}
+    report=build_report([tr],{16:('16.15','cache')})
+    assert report['_xlsx']['users'][0]['Target']=='local'
+    assert report['_xlsx']['users'][0]['Role']=='postgres'
+    assert list(report['_xlsx']['users'][0])[0]=='Target'
+    out=tmp_path/'users.xlsx'; write_xlsx(report['_xlsx'],out)
+    with zipfile.ZipFile(out) as z:
+        wb=z.read('xl/workbook.xml').decode()
+        assert 'name="Users"' in wb
+        sheet3=z.read('xl/worksheets/sheet3.xml').decode()
+        assert 'postgres' in sheet3 and 'app_user' in sheet3 and 'Password Verifier' in sheet3
+
+
+def test_discovery_sheet_is_enriched_with_environment_and_postgres_details():
+    tr={'target':{'label':'10.0.0.11','host':'10.0.0.11','mode':'remote-host'},
+        'discovery':{'host':{'hostname':'db-prod-01','os_release':'NAME="Red Hat Enterprise Linux"\nPRETTY_NAME="Red Hat Enterprise Linux 9.4"\n','kernel':'5.14.0','architecture':'x86_64','whoami':'audit','container_runtimes':['docker']},
+                     'postgres':{'detected':True,'versions':['16.15'],'sql_access':True,'pgdata':'/var/lib/pgsql/16/data','config_file':'/etc/postgresql.conf','hba_file':'/etc/pg_hba.conf','binaries':['/usr/bin/postgres'],'services':['postgresql-16.service enabled'],'config_files':['/etc/postgresql.conf']}},
+        'cis':[],'esa':[],'benchmark':16}
+    row=build_report([tr],{16:('16.15','cache')})['_xlsx']['discovery'][0]
+    assert row['OS Release']=='Red Hat Enterprise Linux 9.4'
+    assert row['Kernel']=='5.14.0' and row['Architecture']=='x86_64' and row['Audit User']=='audit'
+    assert row['Data Directory']=='/var/lib/pgsql/16/data'
+    assert row['Config File']=='/etc/postgresql.conf' and row['HBA File']=='/etc/pg_hba.conf'
+    assert row['PostgreSQL Binaries']=='/usr/bin/postgres'
+    assert row['Systemd Services']=='postgresql-16.service enabled'
+    assert row['Config Files Found']==1
+    assert row['CIS Benchmark']=='CIS PostgreSQL 16 Benchmark v1.1.0'
+
+
+def test_discovery_container_metadata_columns():
+    tr={'target':{'label':'local/pg-prod','host':'local','mode':'local-container','container_name':'pg-prod'},
+        'discovery':{'container':{'image':'postgres:16.15','user':'postgres','privileged':False,'port_bindings':[{'container_port':'5432/tcp','host_ip':'','host_port':'5432'}]},'postgres':{'detected':True,'versions':['16.15']}},
+        'cis':[],'esa':[],'benchmark':16}
+    row=build_report([tr],{})['_xlsx']['discovery'][0]
+    assert row['Container Image']=='postgres:16.15'
+    assert row['Container Privileged']=='No'
+    assert row['Container Ports']=='*:5432->5432/tcp'
+
+
+def test_test_result_embeds_real_command_output_redacted():
+    fake=FakeExecutor({'environ':CommandResult('PGPASSWORD=UltraSecret123','/proc/4242/environ',0)},sql_responses={'SHOW server_version;':'16.15'})
+    r=_result_status(Auditor(fake,Target('local')),'1.7')
+    assert r.status=='FAIL'
+    assert '/proc/' in r.test_result           # the command context is present
+    assert 'UltraSecret123' not in r.test_result  # secret redacted
+    assert 'PGPASSWORD=<REDACTED>' in r.test_result
+
+
+def test_setting_result_includes_raw_show_output():
+    fake=FakeExecutor(sql_responses={'SHOW server_version;':'16.15','SHOW log_hostname;':'off'})
+    r=_result_status(Auditor(fake,Target('local')),'3.1.23')
+    assert r.status=='PASS'
+    assert 'log_hostname' in r.test_result and ('off' in r.test_result or 'log_hostname=off' in r.test_result)

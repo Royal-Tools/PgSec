@@ -39,7 +39,16 @@ def _sheet_xml(rows: list[dict], sheet_name: str) -> str:
         "Metric":34, "Value":70, "Mode":18, "Host":24, "Scope":12, "OS Hostname":24, "Container":28,
         "PostgreSQL Detected":20, "SQL Access":14, "Version":18, "OS":60,
         "Section":14, "Control":14, "Source":16, "Detail":80,
-        "Command":70, "Return Code":14, "Timestamp":25,
+        "Command":70, "Path Hash (SHA256)":70, "Return Code":14, "Timestamp":25,
+        "Role":34, "Type":12, "Login":10, "Superuser":12, "CreateRole":12, "CreateDB":12,
+        "Replication":12, "BypassRLS":12, "Connection Limit":16, "Valid Until":22,
+        "Password Verifier":20, "Member Of":44,
+        "OS Release":40, "Kernel":26, "Architecture":14, "Audit User":18,
+        "Container Runtimes":22, "Container Image":42, "Container User":18,
+        "Container Privileged":20, "Container Ports":38,
+        "Data Directory":42, "Config File":42, "HBA File":42,
+        "PostgreSQL Binaries":44, "Systemd Services":44, "Config Files Found":18,
+        "CIS Benchmark":40,
     }
     widths=[]
     for h in headers:
@@ -198,6 +207,7 @@ def write_xlsx(data: dict, path: str | Path) -> None:
     order = [
         ("Summary", data.get("summary", [])),
         ("Discovery", data.get("discovery", [])),
+        ("Users", data.get("users", [])),
         ("CIS", data.get("cis", [])),
         ("ESA", data.get("esa", [])),
         ("Evidence", data.get("evidence", [])),

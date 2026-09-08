@@ -1,4 +1,5 @@
 import re
+import pytest
 import json, os, sys, tempfile, zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -6,17 +7,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pgsec.models import Result, CommandResult, Target
 from pgsec.executors import LocalExecutor, ContainerExecutor, FakeExecutor
 from pgsec.xlsx_writer import write_xlsx
-from pgsec.rules import CIS_RULES, ESA_RULES
+from pgsec.rules import CIS16_RULES, CIS18_RULES, ESA_RULES
 from pgsec.audit import Auditor
 from pgsec.discovery import parse_container_listing
 
 
 def test_rule_catalog_complete_and_unique():
-    ids = [r['id'] for r in CIS_RULES]
-    assert len(ids) == 71, len(ids)
-    assert len(ids) == len(set(ids))
-    assert ids[0] == '1.1'
-    assert ids[-1] == '8.3'
+    for catalog, total in ((CIS16_RULES,71),(CIS18_RULES,72)):
+        ids = [r['id'] for r in catalog]
+        assert len(ids) == total, len(ids)
+        assert len(ids) == len(set(ids))
+        assert ids[0] == '1.1'
+        assert ids[-1] == '8.3'
+    assert '4.10' not in {r['id'] for r in CIS16_RULES}
+    assert '4.10' in {r['id'] for r in CIS18_RULES}
+    assert [r['id'] for r in CIS16_RULES] == [r['id'] for r in CIS18_RULES if r['id']!='4.10']
     esa_ids = [r['id'] for r in ESA_RULES]
     assert len(esa_ids) >= 17
     assert len(esa_ids) == len(set(esa_ids))
@@ -74,7 +79,7 @@ def test_auditor_runs_with_fake_postgres():
     }
     fake = FakeExecutor({}, sql_responses=responses)
     target = Target(mode='local', host='local')
-    auditor = Auditor(fake, target, current_pg16='16.15')
+    auditor = Auditor(fake, target, current_pg='16.15')
     results = auditor.run_cis(control_ids=['1.5','3.1.20','3.1.21','6.8','6.9'])
     by = {r.control_id:r.status for r in results}
     assert by['1.5'] == 'PASS'
@@ -138,7 +143,7 @@ class PermissiveExecutor:
 
 def test_full_catalog_executes_without_internal_errors():
     ex=PermissiveExecutor(); target=Target(mode='local',host='local')
-    aud=Auditor(ex,target,current_pg16='16.15',context={'postgres':{'pgdata':'/var/lib/postgresql/16/data'},'host':{},'container':{}})
+    aud=Auditor(ex,target,current_pg='16.15',context={'postgres':{'pgdata':'/var/lib/postgresql/16/data'},'host':{},'container':{}})
     cis=aud.run_cis(); esa=aud.run_esa()
     assert len(cis)==71
     assert len(esa)>=18
@@ -149,6 +154,7 @@ def test_ip_list_and_cidr_loader(tmp_path):
     f=tmp_path/'targets.txt'; f.write_text('# comment\n10.0.0.1\n10.0.0.4/30\ndb.example\n')
     assert load_targets(str(f)) == ['10.0.0.1','10.0.0.5','10.0.0.6','db.example']
 
+@pytest.mark.skipif(os.name=='nt',reason='executing a .py helper directly requires a POSIX exec layer')
 def test_ssh_password_not_exposed_in_argv(tmp_path, monkeypatch):
     helper=tmp_path/'helper.py'; arglog=tmp_path/'args.txt'; stdinlog=tmp_path/'stdin.txt'
     helper.write_text("#!/usr/bin/env python3\nimport sys, pathlib\npathlib.Path(%r).write_text('\\n'.join(sys.argv[1:]))\npathlib.Path(%r).write_text(sys.stdin.read())\nprint('ok')\n" % (str(arglog),str(stdinlog)))
@@ -167,3 +173,27 @@ def test_terminal_handles_empty_failure_result(capsys):
     r=Result('FAIL','X','D','','S','C')
     terminal.print_control(r,1,1)
     assert 'FAIL' in capsys.readouterr().out
+
+
+def test_full_catalog_pg18_executes_without_internal_errors():
+    class PermissiveExecutor18(PermissiveExecutor):
+        def sql(self, sql, timeout=20):
+            if re.match(r'^SHOW\s+server_version;$',sql.strip(),re.I): return CommandResult('18.6',' ',0)
+            return super().sql(sql,timeout)
+    ex=PermissiveExecutor18(); target=Target(mode='local',host='local')
+    aud=Auditor(ex,target,current_pg='18.6',benchmark=18,context={'postgres':{'pgdata':'/var/lib/postgresql/16/data'},'host':{},'container':{}})
+    cis=aud.run_cis(); esa=aud.run_esa()
+    assert len(cis)==72
+    assert len(esa)>=18
+    assert all('Internal check error' not in r.test_result for r in cis+esa)
+    assert all(r.status in {'PASS','FAIL','WARN','REVIEW','ERROR','N/A','SKIPPED'} for r in cis+esa)
+
+
+def test_resolve_benchmark_selection_modes():
+    from pgsec.app import resolve_benchmark
+    assert resolve_benchmark(18,16)==18          # forced preference wins
+    assert resolve_benchmark(16,18)==16
+    assert resolve_benchmark(None,16)==16        # auto-detect
+    assert resolve_benchmark(None,18)==18
+    assert resolve_benchmark(None,None)=='ASK'   # undetectable -> interactive ask
+    assert resolve_benchmark(None,17) is None    # unsupported major -> no CIS score

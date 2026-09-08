@@ -11,7 +11,7 @@ def _r(id, title, assessment, description, solution, comments):
         "comments": comments,
     }
 
-CIS_RULES = [
+CIS16_RULES = [
 _r("1.1","Ensure packages are obtained from authorized repositories","Manual","Review PostgreSQL package origins and enabled software repositories.","Remove unapproved repositories and install PostgreSQL only from organization-approved distribution/vendor or official PGDG repositories.","Untrusted package sources can introduce modified or malicious database binaries."),
 _r("1.2","Install only required packages","Manual","Inventory PostgreSQL-related packages and identify components that are not required for the server role.","Remove unnecessary PostgreSQL add-ons, administration web tools, documentation packages, and unused extensions according to the approved build standard.","Reducing installed software reduces attack surface."),
 _r("1.3","Ensure systemd Service Files Are Enabled","Automated","Confirm the intended PostgreSQL systemd service is enabled on Linux hosts.","Enable the intended PostgreSQL service with systemctl enable <service> after validating the correct instance.","Disabled service registration can cause unexpected availability and recovery behavior."),
@@ -92,6 +92,20 @@ _r("8.2","Ensure the backup and restore tool, 'pgBackRest', is installed and con
 _r("8.3","Ensure miscellaneous configuration settings are correct","Manual","Review dynamic library paths, preload libraries, external PID location, and UNIX socket directories/permissions.","Restrict socket/library directories, remove unauthorized preload libraries, and keep writable paths out of privileged dynamic loading/search locations.","Writable library/socket paths can enable privilege abuse, code loading, or unauthorized local access."),
 ]
 
+# CIS PostgreSQL 18 Benchmark v1.0.0 (2026-03-27) keeps the v1.1.0 PG16 catalog
+# structure and adds one recommendation: 4.10 (login roles without a password).
+CIS18_RULES = list(CIS16_RULES)
+CIS18_RULES.insert(next(i for i,r in enumerate(CIS18_RULES) if r['id']=='5.1'),
+_r("4.10","Ensure all accounts that can log in have passwords","Manual","Unless certificate-based authentication is used, every database account that can log in should have a password set. An account without a stored password can never authenticate with a password, so interactive use of such an account implies certificate or external authentication.","Set a valid password for every login role that is not certificate-based. Prefer ALTER ROLE ... PASSWORD or \\password; note that ALTER ROLE can emit the new password to the server log, so use a protected session and SCRAM-SHA-256.","Passwordless login roles rely entirely on alternative authentication and can become unmanaged access paths."),
+)
+
+CIS_RULES_BY_MAJOR = {16: CIS16_RULES, 18: CIS18_RULES}
+
+BENCHMARKS = {
+    16: {'label': 'CIS PostgreSQL 16 Benchmark v1.1.0', 'date': '2025-06-30'},
+    18: {'label': 'CIS PostgreSQL 18 Benchmark v1.0.0', 'date': '2026-03-27'},
+}
+
 ESA_RULES = [
 _r("ESA-01","Backup Freshness & Restore Readiness","Enhanced","Measure backup freshness, pgBackRest/base-backup evidence, verification signals, and restore-test evidence.","Define RPO/RTO, automate encrypted backups, run verification, and perform periodic isolated restore tests.","Backup existence alone does not prove recoverability."),
 _r("ESA-02","Data Checksums & Corruption Signals","Enhanced","Check data_checksums and cluster checksum failure counters.","Enable checksums using supported PostgreSQL procedures and investigate any checksum failure immediately.","Checksums improve detection of storage/page corruption."),
@@ -113,5 +127,5 @@ _r("ESA-17","Logical Decoding Output Plugin Allowlist (PostgreSQL 16.15+)","Enha
 _r("ESA-18","Extension & Untrusted Language Inventory","Enhanced","Inventory installed extensions and untrusted procedural languages for review against an approved allowlist.","Remove unused/unapproved extensions and untrusted languages; restrict CREATE EXTENSION and library installation paths.","Extensions and untrusted languages can execute powerful server-side code."),
 ]
 
-CIS_BY_ID = {r['id']: r for r in CIS_RULES}
+CIS_BY_ID = {16: {r['id']: r for r in CIS16_RULES}, 18: {r['id']: r for r in CIS18_RULES}}
 ESA_BY_ID = {r['id']: r for r in ESA_RULES}

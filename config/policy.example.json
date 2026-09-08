@@ -7,6 +7,7 @@
     "app_user",
     "report_user"
   ],
+  "cert_login_roles": [],
   "allowed_superusers": [
     "postgres"
   ],
