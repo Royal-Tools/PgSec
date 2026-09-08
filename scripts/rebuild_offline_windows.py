@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "PGSEC_OFFLINE_LINUX_X86_64_PRODUCTION_v1.1.2"
+OUT = ROOT / "PGSEC_OFFLINE_LINUX_X86_64_PRODUCTION_v1.2.0"
 PY_RELEASE = "20260325"
 PY_VER = "3.13.12"
 ARCHIVE = f"cpython-{PY_VER}+{PY_RELEASE}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"

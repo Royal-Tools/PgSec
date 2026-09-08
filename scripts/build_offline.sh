@@ -5,6 +5,8 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT=${1:-"$ROOT/dist/pg-sec-audit-linux-x86_64"}
+# Output directory in the release layout
+BUNDLE_OUT=${2:-"$ROOT/PGSEC_OFFLINE_LINUX_X86_64_PRODUCTION_v1.2.0"}
 PY_RELEASE=${PY_RELEASE:-20260325}
 PY_VER=${PY_VER:-3.13.12}
 PY_TRIPLE=${PY_TRIPLE:-x86_64-unknown-linux-gnu}
