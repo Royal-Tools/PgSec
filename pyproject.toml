@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pgsec"
+version = "1.2.0"
+description = "PostgreSQL Security Assessment Engine based on CIS PostgreSQL 16/18 Benchmarks"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Royal-Tools"},
+]
+keywords = ["postgresql", "security", "audit", "cis", "benchmark", "compliance"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.scripts]
+pg-sec-audit = "pgsec.app:main"
+
+[project.urls]
+Homepage = "https://github.com/Royal-Tools/PgSec"
+Repository = "https://github.com/Royal-Tools/PgSec"
+Issues = "https://github.com/Royal-Tools/PgSec/issues"
+
+[tool.setuptools.packages.find]
+include = ["pgsec*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
